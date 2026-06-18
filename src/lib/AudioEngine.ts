@@ -66,6 +66,8 @@ export class AudioEngine {
   public isCapturing: boolean = false;
   private pauseTimeout: ReturnType<typeof setTimeout> | null = null;
   private fadeTime = 0.5; // seconds
+  private visualReleaseUntil = 0;
+  private visualReleaseTime = 1.6; // seconds
   
   private beatThreshold = 0.4;
   private beatDecay = 0.95;
@@ -159,6 +161,7 @@ export class AudioEngine {
   }
 
   public stopCapture() {
+    this.beginVisualRelease();
     if (this.captureStream) {
       this.captureStream.getTracks().forEach(track => track.stop());
       this.captureStream = null;
@@ -172,6 +175,7 @@ export class AudioEngine {
   }
 
   public loadFile(file: File) {
+    this.beginVisualRelease();
     this.stopCapture();
     const url = URL.createObjectURL(file);
     this.audioElement.src = url;
@@ -179,6 +183,7 @@ export class AudioEngine {
   }
 
   public loadUrl(url: string) {
+    this.beginVisualRelease();
     this.stopCapture();
     this.audioElement.src = url;
     this.audioElement.load();
@@ -205,6 +210,7 @@ export class AudioEngine {
   }
 
   public pause() {
+    this.beginVisualRelease();
     if (this.fadeNode && this.audioCtx) {
        this.fadeNode.gain.cancelScheduledValues(this.audioCtx.currentTime);
        this.fadeNode.gain.setValueAtTime(this.fadeNode.gain.value, this.audioCtx.currentTime);
@@ -224,6 +230,10 @@ export class AudioEngine {
     } else {
       this.play();
     }
+  }
+
+  private beginVisualRelease(seconds = this.visualReleaseTime) {
+    this.visualReleaseUntil = performance.now() + seconds * 1000;
   }
 
   private prevData: number[] = new Array(512).fill(0);
@@ -316,6 +326,7 @@ export class AudioEngine {
       return { ...this.smoothedData };
     }
 
+    const isVisualReleasing = performance.now() < this.visualReleaseUntil;
     let energySum = 0;
     let centroidNum = 0;
     let centroidDen = 0;
@@ -370,8 +381,9 @@ export class AudioEngine {
       this.evaluateTrigger(this.pulseTrigger, fluxPulse);
       this.evaluateTrigger(this.meteorTrigger, fluxMeteor);
     } else {
-      // If paused, all raw values stay 0, but we still do smoothing loop below
+      // When playback stops or switches, decay raw and smoothed values instead of snapping to zero.
       for (let i = 0; i < binCount; i++) {
+          this.dataArray[i] = isVisualReleasing ? Math.floor(this.dataArray[i] * 0.94) : 0;
           this.prevData[i] = 0;
       }
     }
@@ -421,7 +433,8 @@ export class AudioEngine {
     const spectralCentroid = centroidDen > 0 ? centroidNum / centroidDen : 0;
 
     // Apply Exponential Smoothing to prevent sudden jumping/explosions
-    const dt = 0.15; // smoothing factor (0 = stuck, 1 = instant jump)
+    const hasIncomingAudio = this.isPlaying && energySum > 0;
+    const dt = hasIncomingAudio ? 0.15 : (isVisualReleasing ? 0.035 : 0.08); // smoothing factor (0 = stuck, 1 = instant jump)
     
     this.smoothedData.bass += (oldBass - this.smoothedData.bass) * dt;
     this.smoothedData.mid += (oldMid - this.smoothedData.mid) * dt;

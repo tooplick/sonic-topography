@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Play, Pause, Upload, Volume2, SkipForward, SkipBack, Palette } from 'lucide-react';
+import { Play, Pause, Volume2, SkipForward, SkipBack, Palette, Plus, ListMusic, Shuffle, Repeat, Trash2 } from 'lucide-react';
 import { engine } from '../../lib/AudioEngine';
 import { themes } from '../../lib/themes';
 import { LyricsDisplay } from './LyricsDisplay';
@@ -8,6 +8,52 @@ import { extractAudioMetadata, extractLyricsFromAudio } from '../../lib/metadata
 interface UIProps {
   theme: string;
   onThemeChange: (theme: string) => void;
+}
+
+interface NeteaseSong {
+  id: number;
+  name: string;
+  artist: string;
+  album: string;
+  duration: number;
+  fee: number;
+}
+
+interface SavedPlaylist {
+  id: string;
+  name: string;
+  songs: NeteaseSong[];
+}
+
+type PlayMode = 'sequence' | 'shuffle';
+type PendingDelete =
+  | { type: 'song'; playlistId: string; songId: number; label: string }
+  | { type: 'playlist'; playlistId: string; label: string };
+
+const PLAYLIST_STORAGE_KEY = 'sonic-topography-playlists-v1';
+
+function createDefaultPlaylists(): SavedPlaylist[] {
+  return [
+    { id: 'favorites', name: 'Favorites', songs: [] },
+    { id: 'visual-set', name: 'Visual Set', songs: [] },
+  ];
+}
+
+function readSavedPlaylists(): SavedPlaylist[] {
+  try {
+    const raw = window.localStorage.getItem(PLAYLIST_STORAGE_KEY);
+    if (!raw) return createDefaultPlaylists();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return createDefaultPlaylists();
+    return parsed.map((playlist: SavedPlaylist) => ({
+      id: playlist.id,
+      name: playlist.name,
+      songs: Array.isArray(playlist.songs) ? playlist.songs : [],
+    }));
+  } catch (error) {
+    console.warn('Unable to read saved playlists:', error);
+    return createDefaultPlaylists();
+  }
 }
 
 export function UI({ theme, onThemeChange }: UIProps) {
@@ -23,6 +69,24 @@ export function UI({ theme, onThemeChange }: UIProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [showFreqPanel, setShowFreqPanel] = useState(false);
+  const [showSearchPanel, setShowSearchPanel] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<NeteaseSong[]>([]);
+  const [searchStatus, setSearchStatus] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [showPlaylistPanel, setShowPlaylistPanel] = useState(false);
+  const [playlists, setPlaylists] = useState<SavedPlaylist[]>(readSavedPlaylists);
+  const [activePlaylistId, setActivePlaylistId] = useState('favorites');
+  const [songToAdd, setSongToAdd] = useState<NeteaseSong | null>(null);
+  const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [playMode, setPlayMode] = useState<PlayMode>('sequence');
+  const [playQueue, setPlayQueue] = useState<NeteaseSong[]>([]);
+  const [currentSongId, setCurrentSongId] = useState<number | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+
+  useEffect(() => {
+    window.localStorage.setItem(PLAYLIST_STORAGE_KEY, JSON.stringify(playlists));
+  }, [playlists]);
   
   // Audio state poller
   useEffect(() => {
@@ -133,6 +197,163 @@ export function UI({ theme, onThemeChange }: UIProps) {
     engine.togglePlay();
   };
 
+  const searchNetease = async () => {
+    const keywords = searchQuery.trim();
+    if (!keywords) return;
+
+    setIsSearching(true);
+    setSearchStatus('Searching...');
+    setSearchResults([]);
+
+    try {
+      const response = await fetch(`/api/netease/search?keywords=${encodeURIComponent(keywords)}`);
+      if (!response.ok) throw new Error('Search request failed');
+
+      const data = await response.json();
+      setSearchResults(data.songs || []);
+      setSearchStatus(data.songs?.length ? '' : 'No playable songs found');
+    } catch (error) {
+      console.warn('Netease search failed:', error);
+      setSearchStatus('Search failed');
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const loadNeteaseSong = async (song: NeteaseSong, queue?: NeteaseSong[]) => {
+    if (queue) setPlayQueue(queue);
+    setCurrentSongId(song.id);
+    setTrackName(`${song.artist ? `${song.artist} - ` : ''}${song.name}`);
+    setLyricsText('');
+    setSearchStatus('Loading song...');
+
+    try {
+      const [urlResponse, lyricResponse] = await Promise.all([
+        fetch(`/api/netease/url?id=${song.id}`),
+        fetch(`/api/netease/lyric?id=${song.id}`),
+      ]);
+
+      const urlData = await urlResponse.json();
+      const lyricData = await lyricResponse.json();
+      const lyric = lyricData.lyric || lyricData.translatedLyric || '';
+      setLyricsText(lyric);
+
+      if (!urlData.url) {
+        setSearchStatus('Song unavailable, skipping...');
+        playFromQueue(1, song.id);
+        return;
+      }
+
+      engine.init();
+      engine.loadUrl(`/api/netease/audio?id=${song.id}`);
+      engine.play();
+      setSearchStatus('');
+      setShowSearchPanel(false);
+    } catch (error) {
+      console.warn('Unable to load Netease song:', error);
+      setSearchStatus('Load failed, skipping...');
+      playFromQueue(1, song.id);
+    }
+  };
+
+  const getCurrentQueue = () => playQueue.length > 0 ? playQueue : activePlaylist?.songs || [];
+
+  const playFromQueue = (direction: 1 | -1, fromSongId = currentSongId) => {
+    const queue = getCurrentQueue();
+    if (queue.length === 0) return;
+
+    let nextIndex = 0;
+    const currentIndex = queue.findIndex((song) => song.id === fromSongId);
+
+    if (playMode === 'shuffle' && queue.length > 1) {
+      do {
+        nextIndex = Math.floor(Math.random() * queue.length);
+      } while (nextIndex === currentIndex);
+    } else {
+      const baseIndex = currentIndex >= 0 ? currentIndex : 0;
+      nextIndex = (baseIndex + direction + queue.length) % queue.length;
+    }
+
+    loadNeteaseSong(queue[nextIndex], queue);
+  };
+
+  useEffect(() => {
+    const handleEnded = () => {
+      const queue = getCurrentQueue();
+      if (queue.length > 1) playFromQueue(1);
+    };
+
+    engine.audioElement.addEventListener('ended', handleEnded);
+    return () => engine.audioElement.removeEventListener('ended', handleEnded);
+  }, [playQueue, currentSongId, playMode, activePlaylistId, playlists]);
+
+  const addSongToPlaylist = (playlistId: string, song: NeteaseSong) => {
+    setPlaylists((current) => current.map((playlist) => {
+      if (playlist.id !== playlistId) return playlist;
+      const exists = playlist.songs.some((savedSong) => savedSong.id === song.id);
+      if (exists) return playlist;
+      return { ...playlist, songs: [...playlist.songs, song] };
+    }));
+    const playlistName = playlists.find((playlist) => playlist.id === playlistId)?.name || 'playlist';
+    setSearchStatus(`Added to ${playlistName}`);
+    setSongToAdd(null);
+  };
+
+  const createPlaylistAndAddSong = () => {
+    const name = newPlaylistName.trim();
+    if (!name || !songToAdd) return;
+
+    const id = `playlist-${Date.now()}`;
+    setPlaylists((current) => [...current, { id, name, songs: [songToAdd] }]);
+    setActivePlaylistId(id);
+    setSearchStatus(`Added to ${name}`);
+    setSongToAdd(null);
+    setNewPlaylistName('');
+  };
+
+  const deleteSongFromPlaylist = (playlistId: string, songId: number) => {
+    setPlaylists((current) => current.map((playlist) => {
+      if (playlist.id !== playlistId) return playlist;
+      return { ...playlist, songs: playlist.songs.filter((song) => song.id !== songId) };
+    }));
+
+    setPlayQueue((queue) => queue.filter((song) => song.id !== songId));
+    if (currentSongId === songId) {
+      setCurrentSongId(null);
+    }
+  };
+
+  const deletePlaylist = (playlistId: string) => {
+    if (playlists.length <= 1) return;
+
+    const nextPlaylists = playlists.filter((playlist) => playlist.id !== playlistId);
+    setPlaylists(nextPlaylists);
+
+    if (activePlaylistId === playlistId) {
+      setActivePlaylistId(nextPlaylists[0]?.id || 'favorites');
+    }
+
+    const deletedPlaylist = playlists.find((playlist) => playlist.id === playlistId);
+    if (deletedPlaylist?.songs.some((song) => song.id === currentSongId)) {
+      setPlayQueue([]);
+      setCurrentSongId(null);
+    }
+  };
+
+  const confirmPendingDelete = () => {
+    if (!pendingDelete) return;
+
+    if (pendingDelete.type === 'song') {
+      deleteSongFromPlaylist(pendingDelete.playlistId, pendingDelete.songId);
+    } else {
+      deletePlaylist(pendingDelete.playlistId);
+    }
+
+    setPendingDelete(null);
+  };
+
+  const activePlaylist = playlists.find((playlist) => playlist.id === activePlaylistId) || playlists[0];
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
@@ -208,6 +429,12 @@ export function UI({ theme, onThemeChange }: UIProps) {
           <button onClick={() => setShowFreqPanel(true)} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2" style={{ writingMode: 'vertical-rl' }}>
             Trigger
           </button>
+          <button onClick={() => setShowSearchPanel(true)} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2" style={{ writingMode: 'vertical-rl' }}>
+            Search
+          </button>
+          <button onClick={() => setShowPlaylistPanel(true)} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer flex items-center justify-center gap-2" style={{ writingMode: 'vertical-rl' }}>
+            Playlist
+          </button>
           
           <div className="mt-auto flex flex-col items-center gap-10">
             <button 
@@ -256,6 +483,217 @@ export function UI({ theme, onThemeChange }: UIProps) {
       <div className="absolute top-[40px] left-[100px] font-black text-[24px] tracking-[-1px] text-white z-50 select-none">
         AJIN.
       </div>
+
+      {/* Player Panel */}
+      {showSearchPanel && (
+        <div className="absolute top-[40px] left-[100px] w-[360px] max-h-[70vh] z-50 pointer-events-auto backdrop-blur-[20px] border border-white/10 rounded-sm overflow-hidden" style={{ background: 'rgba(5,10,15,0.88)' }}>
+          <div className="p-5 border-b border-white/10">
+            <div className="flex items-center justify-between mb-4">
+              <div className="text-[12px] uppercase tracking-[0.2em] text-white/70">Netease Search</div>
+              <button onClick={() => setShowSearchPanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">Close</button>
+            </div>
+            <form
+              className="flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                searchNetease();
+              }}
+            >
+              <input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Song or artist"
+                className="min-w-0 flex-1 bg-white/5 border border-white/10 rounded-sm px-3 py-2 text-[12px] text-white outline-none focus:border-white/30"
+              />
+              <button
+                type="submit"
+                disabled={isSearching}
+                className="px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-black rounded-sm disabled:opacity-50"
+                style={{ backgroundColor: accentHex }}
+              >
+                Go
+              </button>
+            </form>
+            {searchStatus && <div className="mt-3 text-[11px] text-white/45">{searchStatus}</div>}
+          </div>
+          <div className="max-h-[48vh] overflow-y-auto">
+            {searchResults.map((song) => (
+              <button
+                key={song.id}
+                onClick={() => loadNeteaseSong(song, searchResults)}
+                className="relative w-full text-left px-5 py-4 pr-16 border-b border-white/5 hover:bg-white/5 transition-colors"
+              >
+                <div className={`text-[13px] truncate ${currentSongId === song.id ? 'text-white' : 'text-white/80'}`}>{song.name}</div>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSongToAdd(song);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setSongToAdd(song);
+                    }
+                  }}
+                  className="absolute right-5 top-1/2 -translate-y-1/2 h-8 w-8 rounded-sm border border-white/10 text-white/55 hover:text-black hover:border-transparent transition-colors flex items-center justify-center"
+                  title="Add to playlist"
+                >
+                  <Plus size={15} />
+                </span>
+                <div className="mt-1 text-[11px] text-white/45 truncate">{song.artist || 'Unknown artist'} · {song.album || 'Unknown album'}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {songToAdd && (
+        <div className="absolute top-[120px] left-[480px] w-[280px] z-[70] pointer-events-auto backdrop-blur-[20px] border border-white/10 rounded-sm overflow-hidden" style={{ background: 'rgba(5,10,15,0.94)' }}>
+          <div className="p-5 border-b border-white/10">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-[10px] uppercase tracking-[0.18em] text-white/45 mb-2">Add To Playlist</div>
+                <div className="text-[13px] text-white truncate" title={songToAdd.name}>{songToAdd.name}</div>
+              </div>
+              <button onClick={() => setSongToAdd(null)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">Close</button>
+            </div>
+          </div>
+          <div className="p-3 border-b border-white/10">
+            {playlists.map((playlist) => (
+              <button
+                key={playlist.id}
+                onClick={() => addSongToPlaylist(playlist.id, songToAdd)}
+                className="w-full flex items-center justify-between gap-3 px-3 py-3 text-left hover:bg-white/5 rounded-sm transition-colors"
+              >
+                <span className="min-w-0 text-[12px] text-white truncate">{playlist.name}</span>
+                <span className="text-[10px] text-white/35">{playlist.songs.length}</span>
+              </button>
+            ))}
+          </div>
+          <form
+            className="p-4 flex gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              createPlaylistAndAddSong();
+            }}
+          >
+            <input
+              value={newPlaylistName}
+              onChange={(e) => setNewPlaylistName(e.target.value)}
+              placeholder="New playlist"
+              className="min-w-0 flex-1 bg-white/5 border border-white/10 rounded-sm px-3 py-2 text-[12px] text-white outline-none focus:border-white/30"
+            />
+            <button
+              type="submit"
+              className="h-9 w-9 flex-shrink-0 rounded-sm text-black flex items-center justify-center disabled:opacity-50"
+              style={{ backgroundColor: accentHex }}
+              disabled={!newPlaylistName.trim()}
+              title="Create playlist"
+            >
+              <Plus size={15} />
+            </button>
+          </form>
+        </div>
+      )}
+
+      {showPlaylistPanel && (
+        <div className="absolute top-[40px] left-[100px] w-[420px] max-h-[74vh] z-[65] pointer-events-auto backdrop-blur-[20px] border border-white/10 rounded-sm overflow-hidden" style={{ background: 'rgba(5,10,15,0.9)' }}>
+          <div className="p-5 border-b border-white/10">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3 text-[12px] uppercase tracking-[0.2em] text-white/70">
+                <ListMusic size={15} />
+                Playlists
+              </div>
+              <button onClick={() => setShowPlaylistPanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">Close</button>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto pb-1">
+              {playlists.map((playlist) => (
+                <button
+                  key={playlist.id}
+                  onClick={() => setActivePlaylistId(playlist.id)}
+                  className={`flex-shrink-0 px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.12em] transition-colors ${activePlaylist?.id === playlist.id ? 'text-black border-transparent' : 'text-white/45 border-white/10 hover:text-white'}`}
+                  style={{ backgroundColor: activePlaylist?.id === playlist.id ? accentHex : 'transparent' }}
+                >
+                  {playlist.name}
+                </button>
+              ))}
+              </div>
+              <button
+                onClick={() => activePlaylist && setPendingDelete({ type: 'playlist', playlistId: activePlaylist.id, label: activePlaylist.name })}
+                disabled={!activePlaylist || playlists.length <= 1}
+                className="h-8 w-8 flex-shrink-0 rounded-sm border border-white/10 text-white/45 hover:text-[#ef4444] disabled:opacity-20 disabled:hover:text-white/45 flex items-center justify-center"
+                title="Delete playlist"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </div>
+          <div className="max-h-[52vh] overflow-y-auto">
+            {activePlaylist && activePlaylist.songs.length > 0 ? activePlaylist.songs.map((song) => (
+              <button
+                key={song.id}
+                onClick={() => loadNeteaseSong(song, activePlaylist.songs)}
+                className="relative w-full text-left px-5 py-4 pr-16 border-b border-white/5 hover:bg-white/5 transition-colors"
+              >
+                <div className="text-[13px] text-white truncate">{song.name}</div>
+                <div className="mt-1 text-[11px] text-white/45 truncate">{song.artist || 'Unknown artist'} - {song.album || 'Unknown album'}</div>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPendingDelete({ type: 'song', playlistId: activePlaylist.id, songId: song.id, label: song.name });
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setPendingDelete({ type: 'song', playlistId: activePlaylist.id, songId: song.id, label: song.name });
+                    }
+                  }}
+                  className="absolute right-5 top-1/2 -translate-y-1/2 h-8 w-8 rounded-sm border border-white/10 text-white/45 hover:text-[#ef4444] transition-colors flex items-center justify-center"
+                  title="Remove from playlist"
+                >
+                  <Trash2 size={14} />
+                </span>
+              </button>
+            )) : (
+              <div className="px-5 py-8 text-[12px] text-white/40">No songs in this playlist yet</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {pendingDelete && (
+        <div className="absolute inset-0 z-[120] pointer-events-auto flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="w-[320px] border border-white/10 rounded-sm p-5" style={{ background: 'rgba(5,10,15,0.96)' }}>
+            <div className="text-[12px] uppercase tracking-[0.2em] text-white/70 mb-3">
+              Confirm Delete
+            </div>
+            <div className="text-[13px] text-white/80 leading-relaxed mb-5">
+              Delete {pendingDelete.type === 'playlist' ? 'playlist' : 'song'} <span className="text-white">{pendingDelete.label}</span>?
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setPendingDelete(null)}
+                className="px-3 py-2 rounded-sm border border-white/10 text-[10px] uppercase tracking-[0.15em] text-white/45 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmPendingDelete}
+                className="px-3 py-2 rounded-sm border border-[#ef4444]/40 text-[10px] uppercase tracking-[0.15em] text-[#ef4444] hover:bg-[#ef4444] hover:text-black"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Player Panel */}
       {trackName !== 'No track selected' && (
@@ -309,11 +747,33 @@ export function UI({ theme, onThemeChange }: UIProps) {
           <div className={`flex justify-between items-center text-[10px] uppercase tracking-[0.1em] opacity-80 ${isCapturing ? 'opacity-30 pointer-events-none' : ''}`}>
              <span className="w-8">{formatTime(currentTime)}</span>
              <div className="flex items-center gap-4">
-                <button className="hover:text-white transition-colors"><SkipBack size={14} /></button>
+                <button
+                  onClick={() => playFromQueue(-1)}
+                  className="hover:text-white transition-colors disabled:opacity-25 disabled:hover:text-inherit"
+                  disabled={getCurrentQueue().length === 0}
+                  title="Previous track"
+                >
+                  <SkipBack size={14} />
+                </button>
                 <button onClick={togglePlay} className="hover:text-white transition-colors">
                   {isPlaying ? <Pause size={14} className="fill-current" /> : <Play size={14} className="fill-current" />}
                 </button>
-                <button className="hover:text-white transition-colors"><SkipForward size={14} /></button>
+                <button
+                  onClick={() => playFromQueue(1)}
+                  className="hover:text-white transition-colors disabled:opacity-25 disabled:hover:text-inherit"
+                  disabled={getCurrentQueue().length === 0}
+                  title="Next track"
+                >
+                  <SkipForward size={14} />
+                </button>
+                <button
+                  onClick={() => setPlayMode((mode) => mode === 'sequence' ? 'shuffle' : 'sequence')}
+                  className="hover:text-white transition-colors"
+                  title={playMode === 'sequence' ? 'Sequence play' : 'Shuffle play'}
+                  style={{ color: playMode === 'shuffle' ? accentHex : undefined }}
+                >
+                  {playMode === 'sequence' ? <Repeat size={14} /> : <Shuffle size={14} />}
+                </button>
              </div>
              
              <div className="flex items-center gap-2 group w-20 justify-end">

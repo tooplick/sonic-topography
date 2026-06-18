@@ -105,8 +105,14 @@ export function MapScene({ theme = 'nocturnal' }: { theme?: string }) {
     strength: 0,
   })));
   const meteorIndex = useRef(0);
+  const lastMeteorSpawnTime = useRef(-Infinity);
 
   const addMeteor = (strength: number) => {
+     const now = clock.getElapsedTime();
+     const cooldownSeconds = engine.meteorTrigger.cooldown / 60;
+     if (now - lastMeteorSpawnTime.current < cooldownSeconds) return;
+     lastMeteorSpawnTime.current = now;
+
      const idx = meteorIndex.current;
      const angle = Math.random() * Math.PI * 2;
      const dist = Math.random() * 25;
