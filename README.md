@@ -1,81 +1,91 @@
 # Sonic Topography
 
-Sonic Topography is a local audio visualizer built with React, Three.js, Vite, and Web Audio. It can play local demo audio, upload audio and `.lrc` lyrics, search Netease Cloud Music through a local proxy, save browser-local playlists, and drive terrain, ripple, and meteor visuals from the audio spectrum.
+Sonic Topography 是一个本地音乐可视化程序，使用 React、Three.js、Vite 和 Web Audio 构建。它可以播放本地 Demo、上传音频和 `.lrc` 歌词、通过本地代理搜索网易云音乐、保存浏览器本地歌单，并用音频频谱驱动地形、波纹和流星效果。
 
-## Features
+## 功能
 
-- 3D audio-reactive terrain visualizer
-- Local demo track and synced LRC lyrics
-- Audio upload with optional `.lrc` upload
-- Netease Cloud Music search with playable-result filtering
-- Lyrics loading through the local proxy
-- Saved playlists in browser `localStorage`
-- Playlist song deletion and playlist deletion with confirmation
-- Previous/next track controls
-- Sequence and shuffle playback modes
-- One-click Windows launcher
+- 3D 音频响应式地形可视化
+- 内置 Demo 音频和同步 LRC 歌词
+- 支持上传音频和 `.lrc` 歌词
+- 网易云音乐搜索，并过滤不可播放结果
+- 通过本地代理加载歌词和音频
+- 歌单保存在浏览器 `localStorage`
+- 支持删除歌单歌曲、删除歌单，并带确认弹窗
+- 支持上一首、下一首
+- 支持顺序播放和随机播放
+- Windows 一键启动脚本
 
-## One-Click Windows Start
+## Windows 一键启动
 
-Prerequisite: install Node.js first.
+前提：电脑需要先安装 Node.js。
 
-Then download or clone this repository and double-click:
+下载或克隆本仓库后，双击：
 
 ```text
 start-sonic-topography.bat
 ```
 
-The launcher will:
+启动脚本会自动：
 
-1. install dependencies if `node_modules/` is missing;
-2. build the app if `dist/` is missing;
-3. open `http://127.0.0.1:4173`;
-4. run the local production server with Netease proxy support.
+1. 如果没有 `node_modules/`，自动安装依赖；
+2. 如果没有 `dist/`，自动构建项目；
+3. 打开 `http://127.0.0.1:4173`；
+4. 启动带网易云代理功能的本地生产服务器。
 
-## Development
+## 开发运行
 
 ```powershell
 npm install
 npm run dev
 ```
 
-Open:
+打开：
 
 ```text
 http://127.0.0.1:3000
 ```
 
-## Production Local Server
+## 本地生产运行
 
 ```powershell
 npm run build
 npm start
 ```
 
-Open:
+打开：
 
 ```text
 http://127.0.0.1:4173
 ```
 
-## Demo Files
+## Demo 文件
 
-The bundled demo lives in:
+内置 Demo 文件在：
 
 ```text
 public/demo.mp3
 public/demo.lrc
 ```
 
-To replace the demo, keep the same file names.
+如果要替换 Demo，请保持这两个文件名不变。
 
-## Notes
+## 给别人使用
 
-- Netease Cloud Music access uses unofficial web endpoints through the local server. Search results are filtered to songs that currently return a playable URL, but availability can still change because of copyright, membership, region, or login restrictions.
-- Playlists are stored in browser `localStorage`, so clearing site data or switching browser profiles will remove them.
-- The Windows launcher is not a standalone `.exe`; it still requires Node.js on the target computer.
+对方可以下载 GitHub 仓库 ZIP，解压后双击：
 
-## Useful Commands
+```text
+start-sonic-topography.bat
+```
+
+注意：这不是完全独立的 `.exe`，对方电脑仍然需要安装 Node.js。
+
+## 注意事项
+
+- 网易云音乐功能使用的是非官方网页接口，并通过本地服务器代理请求。搜索结果会尽量只显示当前可播放的歌曲，但可播放状态仍可能因为版权、会员、地区或登录限制发生变化。
+- 歌单保存在浏览器 `localStorage`。如果清除站点数据、换浏览器或换浏览器用户配置，歌单会丢失。
+- `start-sonic-topography.bat` 会在本地启动服务，默认地址是 `http://127.0.0.1:4173`。
+
+## 常用命令
 
 ```powershell
 npm run lint
