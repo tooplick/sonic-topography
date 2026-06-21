@@ -49,6 +49,23 @@ export function getAudioUrl(id: string): string {
   return `${API_BASE}/audio?id=${id}`;
 }
 
+// Resolve song ID to direct CDN URL
+const audioUrlCache = new Map<string, string>();
+
+export async function resolveAudioUrl(id: string): Promise<string> {
+  if (audioUrlCache.has(id)) return audioUrlCache.get(id)!;
+  try {
+    const res = await fetch(`${API_BASE}/resolve?id=${id}`);
+    if (!res.ok) return getAudioUrl(id);
+    const data = await res.json();
+    if (data.url) {
+      audioUrlCache.set(id, data.url);
+      return data.url;
+    }
+  } catch {}
+  return getAudioUrl(id);
+}
+
 // Returns the Worker proxy URL for cover art (direct image)
 export function getSongPicSrc(picId: string, size = 500): string {
   if (!picId) return '';

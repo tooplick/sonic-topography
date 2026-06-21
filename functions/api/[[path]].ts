@@ -45,6 +45,40 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
   }
 
+  // Resolve audio ID to direct CDN URL (no proxying)
+  if (path === 'resolve') {
+    const id = params.get('id');
+    if (!id) {
+      return new Response(JSON.stringify({ error: 'Missing id param' }), {
+        status: 400,
+        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+      });
+    }
+    const br = params.get('br') || '320';
+    const bitrates = [br, '320', '192', '128'];
+    const uniqueBr = [...new Set(bitrates)];
+
+    for (const b of uniqueBr) {
+      const metingUrl = `${METING_API}?server=netease&type=url&id=${id}&br=${b}`;
+      try {
+        const resp = await fetch(metingUrl, { redirect: 'manual' });
+        const location = resp.headers.get('Location');
+        if (location) {
+          return new Response(JSON.stringify({ url: location }), {
+            status: 200,
+            headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+          });
+        }
+      } catch {
+        continue;
+      }
+    }
+    return new Response(JSON.stringify({ error: 'No audio found' }), {
+      status: 404,
+      headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+    });
+  }
+
   // Audio proxy - follows 302 redirect and streams audio back
   if (path === 'audio') {
     const id = params.get('id');

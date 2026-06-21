@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { Play, Pause, Volume2, SkipForward, SkipBack, Palette, Shuffle, Repeat, Repeat1, Trash2, Heart, Search } from 'lucide-react';
 import { engine } from '../../lib/AudioEngine';
 import { themes } from '../../lib/themes';
-import { searchMusic, getAudioUrl, getSongPicSrc, parseSearchResult, resolvePicUrl, SearchResult, ParsedSong } from '../../lib/musicApi';
+import { searchMusic, resolveAudioUrl, getSongPicSrc, parseSearchResult, resolvePicUrl, SearchResult, ParsedSong } from '../../lib/musicApi';
 import { TriggerPreset } from '../../lib/AudioEngine';
 
 interface UIProps {
@@ -121,7 +121,7 @@ export function UI({ theme, onThemeChange }: UIProps) {
     }
   };
 
-  const playSong = (song: Song, songList?: Song[]) => {
+  const playSong = async (song: Song, songList?: Song[]) => {
     if (songList) setCurrentSongList(songList);
 
     // Same song already playing - only switch playlist
@@ -158,7 +158,7 @@ export function UI({ theme, onThemeChange }: UIProps) {
     }
 
     // Play audio
-    const audioUrl = getAudioUrl(song.id);
+    const audioUrl = await resolveAudioUrl(song.id);
     engine.loadUrl(audioUrl);
     engine.play();
   };
