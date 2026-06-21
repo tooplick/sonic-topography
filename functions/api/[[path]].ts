@@ -57,20 +57,30 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const br = params.get('br') || '2000';
     const bitrates = [br, '320', '192', '128'];
     const uniqueBr = [...new Set(bitrates)];
+    const rangeHeader = context.request.headers.get('Range');
 
     for (const b of uniqueBr) {
       const metingUrl = `${METING_API}?server=netease&type=url&id=${id}&br=${b}`;
       try {
-        const resp = await fetch(metingUrl, { redirect: 'follow' });
+        const upstreamHeaders: Record<string, string> = {};
+        if (rangeHeader) upstreamHeaders['Range'] = rangeHeader;
+
+        const resp = await fetch(metingUrl, { redirect: 'follow', headers: upstreamHeaders });
         const contentType = resp.headers.get('Content-Type') || '';
-        if (resp.status === 200 && (contentType.includes('audio') || contentType.includes('octet-stream'))) {
+        if ((resp.status === 200 || resp.status === 206) && (contentType.includes('audio') || contentType.includes('octet-stream'))) {
+          const responseHeaders: Record<string, string> = {
+            ...CORS_HEADERS,
+            'Content-Type': contentType,
+            'Accept-Ranges': 'bytes',
+          };
+          const contentLength = resp.headers.get('Content-Length');
+          if (contentLength) responseHeaders['Content-Length'] = contentLength;
+          const contentRange = resp.headers.get('Content-Range');
+          if (contentRange) responseHeaders['Content-Range'] = contentRange;
+
           return new Response(resp.body, {
-            status: 200,
-            headers: {
-              ...CORS_HEADERS,
-              'Content-Type': contentType,
-              'Content-Length': resp.headers.get('Content-Length') || '',
-            },
+            status: resp.status,
+            headers: responseHeaders,
           });
         }
       } catch {

@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Play, Pause, Volume2, SkipForward, SkipBack, Palette, Plus, ListMusic, Shuffle, Repeat, Repeat1, Trash2, Heart, Search } from 'lucide-react';
+import { Play, Pause, Volume2, SkipForward, SkipBack, Palette, Shuffle, Repeat, Repeat1, Trash2, Heart, Search } from 'lucide-react';
 import { engine } from '../../lib/AudioEngine';
 import { themes } from '../../lib/themes';
 import { searchMusic, getAudioUrl, getSongPicSrc, parseSearchResult, resolvePicUrl, SearchResult, ParsedSong } from '../../lib/musicApi';
@@ -18,29 +18,31 @@ interface Song {
   picId?: string;
 }
 
-interface SavedPlaylist {
-  id: string;
-  name: string;
-  songs: Song[];
-}
-
 type PlayMode = 'sequence' | 'shuffle' | 'repeat-one';
-type PendingDelete =
-  | { type: 'song'; playlistId: string; songId: string; label: string }
-  | { type: 'playlist'; playlistId: string; label: string };
 
-const STORAGE_KEY = 'sonic_topography_playlists';
+const FAVORITES_KEY = 'sonic_topography_favorites';
 
-function loadPlaylists(): SavedPlaylist[] {
+function loadFavorites(): Song[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(FAVORITES_KEY);
     if (raw) return JSON.parse(raw);
+    // Migration: extract from old playlists format
+    const old = localStorage.getItem('sonic_topography_playlists');
+    if (old) {
+      const parsed = JSON.parse(old);
+      if (Array.isArray(parsed) && parsed[0]?.songs) {
+        const songs = parsed[0].songs;
+        localStorage.setItem(FAVORITES_KEY, JSON.stringify(songs));
+        localStorage.removeItem('sonic_topography_playlists');
+        return songs;
+      }
+    }
   } catch {}
-  return [{ id: 'default', name: 'Favorites', songs: [] }];
+  return [];
 }
 
-function savePlaylists(list: SavedPlaylist[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+function saveFavorites(list: Song[]) {
+  localStorage.setItem(FAVORITES_KEY, JSON.stringify(list));
 }
 
 export function UI({ theme, onThemeChange }: UIProps) {
@@ -48,20 +50,20 @@ export function UI({ theme, onThemeChange }: UIProps) {
   const [trackName, setTrackName] = useState<string>('No track selected');
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const isSeekingRef = useRef(false);
   const [volume, setVolume] = useState(1);
   const [showFreqPanel, setShowFreqPanel] = useState(false);
-  const [showPlaylistPanel, setShowPlaylistPanel] = useState(false);
+  const [showFavoritesPanel, setShowFavoritesPanel] = useState(false);
   const [showSearchPanel, setShowSearchPanel] = useState(false);
   const [showNowPlaying, setShowNowPlaying] = useState(false);
-  const [playlists, setPlaylists] = useState<SavedPlaylist[]>(loadPlaylists);
-  const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
+  const [favorites, setFavorites] = useState<Song[]>(loadFavorites);
   const [playMode, setPlayMode] = useState<PlayMode>('sequence');
-  const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [currentSongId, setCurrentSongId] = useState<string | null>(null);
   const [currentSongList, setCurrentSongList] = useState<Song[]>([]);
-  const [newPlaylistName, setNewPlaylistName] = useState('');
-  const [showAddPlaylist, setShowAddPlaylist] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [pendingDropName, setPendingDropName] = useState<string | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
@@ -72,9 +74,10 @@ export function UI({ theme, onThemeChange }: UIProps) {
   const [hasMore, setHasMore] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
+  const localFilesRef = useRef<Map<string, File>>(new Map());
 
-  // Persist playlists
-  useEffect(() => { savePlaylists(playlists); }, [playlists]);
+  // Persist favorites
+  useEffect(() => { saveFavorites(favorites); }, [favorites]);
 
   // Focus search input when panel opens
   useEffect(() => {
@@ -128,6 +131,19 @@ export function UI({ theme, onThemeChange }: UIProps) {
     const displayTitle = song.artist ? `${song.name} - ${song.artist}` : song.name;
     setTrackName(displayTitle);
 
+    engine.init();
+
+    // Local file
+    const localFile = localFilesRef.current.get(song.id);
+    if (localFile) {
+      engine.loadFile(localFile);
+      engine.play();
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.metadata = new MediaMetadata({ title: song.name });
+      }
+      return;
+    }
+
     // MediaSession metadata
     if ('mediaSession' in navigator) {
       const hqPic = song.picId ? getSongPicSrc(song.picId, 800) : '';
@@ -143,7 +159,6 @@ export function UI({ theme, onThemeChange }: UIProps) {
 
     // Play audio
     const audioUrl = getAudioUrl(song.id);
-    engine.init();
     engine.loadUrl(audioUrl);
     engine.play();
   };
@@ -163,45 +178,18 @@ export function UI({ theme, onThemeChange }: UIProps) {
     }));
   };
 
-  // Playlist operations
-  const createPlaylist = () => {
-    const name = newPlaylistName.trim();
-    if (!name) return;
-    const newPlaylist: SavedPlaylist = { id: Date.now().toString(), name, songs: [] };
-    setPlaylists(prev => [...prev, newPlaylist]);
-    setNewPlaylistName('');
-    setShowAddPlaylist(false);
-    setActivePlaylistId(newPlaylist.id);
+  // Favorites
+  const toggleFavorite = (song: Song) => {
+    setFavorites(prev => {
+      if (prev.some(s => s.id === song.id)) {
+        return prev.filter(s => s.id !== song.id);
+      }
+      return [...prev, song];
+    });
   };
 
-  const deletePlaylist = (playlistId: string) => {
-    setPlaylists(prev => prev.filter(p => p.id !== playlistId));
-    if (activePlaylistId === playlistId) setActivePlaylistId(null);
-  };
-
-  const addSongToPlaylist = (playlistId: string, song: Song) => {
-    setPlaylists(prev => prev.map(p => {
-      if (p.id !== playlistId) return p;
-      if (p.songs.some(s => s.id === song.id)) return p;
-      return { ...p, songs: [...p.songs, song] };
-    }));
-  };
-
-  const removeSongFromPlaylist = (playlistId: string, songId: string) => {
-    setPlaylists(prev => prev.map(p =>
-      p.id === playlistId ? { ...p, songs: p.songs.filter(s => s.id !== songId) } : p
-    ));
-  };
-
-  const favoriteSong = (song: Song) => {
-    if (playlists.length === 0) return;
-    const first = playlists[0];
-    const isIn = first.songs.some(s => s.id === song.id);
-    if (isIn) {
-      removeSongFromPlaylist(first.id, song.id);
-    } else {
-      addSongToPlaylist(first.id, song);
-    }
+  const removeFavorite = (songId: string) => {
+    setFavorites(prev => prev.filter(s => s.id !== songId));
   };
 
   // Playback controls
@@ -219,25 +207,125 @@ export function UI({ theme, onThemeChange }: UIProps) {
 
   const togglePlay = () => { engine.init(); engine.togglePlay(); };
 
-  const confirmPendingDelete = () => {
-    if (!pendingDelete) return;
-    if (pendingDelete.type === 'song') {
-      removeSongFromPlaylist(pendingDelete.playlistId, pendingDelete.songId);
-    } else {
-      deletePlaylist(pendingDelete.playlistId);
+  const playPendingFiles = () => {
+    if (pendingFiles.length === 0) return;
+    const fileMap = new Map<string, File>();
+    const songs: Song[] = pendingFiles.map((f, i) => {
+      const id = `local-${i}-${f.name}`;
+      fileMap.set(id, f);
+      return {
+        id,
+        name: f.name.replace(/\.[^.]+$/, ''),
+        artist: 'Local File',
+      };
+    });
+    localFilesRef.current = fileMap;
+    setCurrentSongId(null);
+    setCurrentSongList(songs);
+    const displayName = pendingDropName || songs[0].name;
+    setTrackName(displayName);
+    engine.init();
+    engine.loadFile(pendingFiles[0]);
+    engine.play();
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({ title: displayName });
     }
-    setPendingDelete(null);
+    setPendingFiles([]);
+    setPendingDropName(null);
   };
 
-  const activePlaylist = playlists.find(p => p.id === activePlaylistId);
-  const favoritedSongIds = new Set(playlists.flatMap(p => p.songs.map(s => s.id)));
-
-  // Set initial active playlist
   useEffect(() => {
-    if (playlists.length > 0 && !activePlaylistId) {
-      setActivePlaylistId(playlists[0].id);
-    }
-  }, [playlists, activePlaylistId]);
+    let dragCounter = 0;
+
+    const readDirectory = async (entry: FileSystemDirectoryEntry): Promise<File[]> => {
+      const reader = entry.createReader();
+      const allFiles: File[] = [];
+      const readBatch = (): Promise<FileSystemEntry[]> => new Promise((resolve, reject) => {
+        reader.readEntries(resolve, reject);
+      });
+      let entries = await readBatch();
+      while (entries.length > 0) {
+        for (const e of entries) {
+          if (e.isFile) {
+            const file = await new Promise<File>((resolve, reject) => (e as FileSystemFileEntry).file(resolve, reject));
+            if (file.type.startsWith('audio/') || /\.(mp3|wav|ogg|flac|aac|m4a|wma|opus|webm)$/i.test(file.name)) {
+              allFiles.push(file);
+            }
+          } else if (e.isDirectory) {
+            const sub = await readDirectory(e as FileSystemDirectoryEntry);
+            allFiles.push(...sub);
+          }
+        }
+        entries = await readBatch();
+      }
+      return allFiles;
+    };
+
+    const onDragOver = (e: DragEvent) => {
+      e.preventDefault();
+      if (e.dataTransfer?.types.includes('Files')) {
+        setIsDragOver(true);
+      }
+    };
+
+    const onDragEnter = (e: DragEvent) => {
+      e.preventDefault();
+      dragCounter++;
+      if (e.dataTransfer?.types.includes('Files')) {
+        setIsDragOver(true);
+      }
+    };
+
+    const onDragLeave = (e: DragEvent) => {
+      dragCounter--;
+      if (dragCounter <= 0) {
+        dragCounter = 0;
+        setIsDragOver(false);
+      }
+    };
+
+    const onDrop = async (e: DragEvent) => {
+      e.preventDefault();
+      dragCounter = 0;
+      setIsDragOver(false);
+
+      const items = e.dataTransfer?.items;
+      if (!items?.length) return;
+
+      // Check if first item is a directory
+      const entry = items[0]?.webkitGetAsEntry?.();
+      if (entry?.isDirectory) {
+        const files = await readDirectory(entry as FileSystemDirectoryEntry);
+        if (files.length > 0) {
+          // Sort by name for natural order
+          files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+          setPendingFiles(files);
+          setPendingDropName(entry.name);
+        }
+        return;
+      }
+
+      // Single file
+      const file = e.dataTransfer?.files[0];
+      if (file && (file.type.startsWith('audio/') || /\.(mp3|wav|ogg|flac|aac|m4a|wma|opus|webm)$/i.test(file.name))) {
+        setPendingFiles([file]);
+        setPendingDropName(null);
+      }
+    };
+
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('dragenter', onDragEnter);
+    window.addEventListener('dragleave', onDragLeave);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('dragenter', onDragEnter);
+      window.removeEventListener('dragleave', onDragLeave);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, []);
+
+  const favoritedSongIds = new Set(favorites.map(s => s.id));
 
   // Audio state poller
   useEffect(() => {
@@ -245,7 +333,9 @@ export function UI({ theme, onThemeChange }: UIProps) {
     let animationFrameId: number;
     const poll = () => {
       setIsPlaying(engine.isPlaying);
-      setCurrentTime(engine.audioElement.currentTime);
+      if (!isSeekingRef.current) {
+        setCurrentTime(engine.audioElement.currentTime);
+      }
       setDuration(engine.audioElement.duration || 0);
       setVolume(engine.audioElement.volume);
       setIsCapturing(engine.isCapturing);
@@ -327,19 +417,19 @@ export function UI({ theme, onThemeChange }: UIProps) {
       <div className="absolute left-0 top-0 h-full w-[20px] z-[60] group hover:w-[60px] transition-all pointer-events-auto">
         <aside className="absolute left-0 top-0 w-[60px] h-full border-r border-white/5 flex flex-col items-center py-6 pointer-events-auto -translate-x-full group-hover:translate-x-0 transition-transform duration-300 delay-[3000ms] group-hover:delay-0" style={{ background: 'rgba(2,4,10,0.8)' }}>
           <button className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-100 transition-opacity cursor-pointer" style={{ writingMode: 'vertical-rl', color: accentHex }}>Visualizer</button>
-          <button onClick={() => { setShowFreqPanel(v => !v); setShowPlaylistPanel(false); setShowNowPlaying(false); setShowSearchPanel(false); }} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer" style={{ writingMode: 'vertical-rl' }}>
+          <button onClick={() => { setShowFreqPanel(v => !v); setShowFavoritesPanel(false); setShowNowPlaying(false); setShowSearchPanel(false); }} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer" style={{ writingMode: 'vertical-rl' }}>
             Trigger
           </button>
-          <button onClick={() => { setShowPlaylistPanel(v => !v); setShowFreqPanel(false); setShowNowPlaying(false); setShowSearchPanel(false); }} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer" style={{ writingMode: 'vertical-rl' }}>
-            Playlist
+          <button onClick={() => { setShowFavoritesPanel(v => !v); setShowFreqPanel(false); setShowNowPlaying(false); setShowSearchPanel(false); }} className="uppercase tracking-[0.2em] text-[10px] mb-12 opacity-40 hover:opacity-100 transition-opacity cursor-pointer" style={{ writingMode: 'vertical-rl' }}>
+            Favorites
           </button>
-          <button onClick={() => { setShowNowPlaying(v => !v); setShowFreqPanel(false); setShowPlaylistPanel(false); setShowSearchPanel(false); }} className={`uppercase tracking-[0.2em] text-[10px] mb-12 transition-opacity cursor-pointer ${currentSongList.length > 0 ? 'opacity-40 hover:opacity-100' : 'opacity-15 pointer-events-none'}`} style={{ writingMode: 'vertical-rl' }}>
+          <button onClick={() => { setShowNowPlaying(v => !v); setShowFreqPanel(false); setShowFavoritesPanel(false); setShowSearchPanel(false); }} className={`uppercase tracking-[0.2em] text-[10px] mb-12 transition-opacity cursor-pointer ${currentSongList.length > 0 ? 'opacity-40 hover:opacity-100' : 'opacity-15 pointer-events-none'}`} style={{ writingMode: 'vertical-rl' }}>
             Playing
           </button>
 
           <div className="mt-auto flex flex-col items-center gap-10">
             <button
-              onClick={() => { setShowSearchPanel(v => !v); setShowFreqPanel(false); setShowPlaylistPanel(false); setShowNowPlaying(false); }}
+              onClick={() => { setShowSearchPanel(v => !v); setShowFreqPanel(false); setShowFavoritesPanel(false); setShowNowPlaying(false); }}
               className="uppercase tracking-[0.2em] text-[10px] opacity-40 hover:opacity-100 transition-opacity cursor-pointer font-bold"
               style={{ writingMode: 'vertical-rl' }}
             >
@@ -410,11 +500,8 @@ export function UI({ theme, onThemeChange }: UIProps) {
                 result={result}
                 isFavorited={favoritedSongIds.has(parseSearchResult(result).id)}
                 accentHex={accentHex}
-                activePlaylistId={activePlaylistId}
-                activePlaylistName={activePlaylist?.name}
                 onPlay={playSearchResult}
-                onFavorite={(song) => favoriteSong(song)}
-                onAddToPlaylist={(song) => addSongToPlaylist(activePlaylistId!, song)}
+                onFavorite={(song) => toggleFavorite(song)}
               />
             ))}
             {hasMore && (
@@ -426,70 +513,21 @@ export function UI({ theme, onThemeChange }: UIProps) {
         </div>
       )}
 
-      {/* Playlist Panel */}
-      {showPlaylistPanel && (
+      {/* Favorites Panel */}
+      {showFavoritesPanel && (
         <div className="absolute top-[40px] left-[100px] w-[420px] max-h-[74vh] z-[65] pointer-events-auto backdrop-blur-[20px] border border-white/10 rounded-sm overflow-hidden" style={{ background: 'rgba(5,10,15,0.9)' }}>
-          <div className="p-5 border-b border-white/10">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-3 text-[12px] uppercase tracking-[0.2em] text-white/70">
-                <ListMusic size={15} />
-                Playlists
-              </div>
-              <button onClick={() => setShowPlaylistPanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">Close</button>
+          <div className="p-5 border-b border-white/10 flex items-center justify-between">
+            <div className="flex items-center gap-3 text-[12px] uppercase tracking-[0.2em] text-white/70">
+              <Heart size={15} className="text-[#ec4899]" />
+              Favorites
             </div>
-            <div className="flex items-center gap-3">
-              <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto pb-1">
-                {playlists.map((playlist) => (
-                  <button
-                    key={playlist.id}
-                    onClick={() => setActivePlaylistId(playlist.id)}
-                    className={`flex-shrink-0 px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.12em] transition-colors ${activePlaylistId === playlist.id ? 'text-black border-transparent' : 'text-white/45 border-white/10 hover:text-white'}`}
-                    style={{ backgroundColor: activePlaylistId === playlist.id ? accentHex : 'transparent' }}
-                  >
-                    {playlist.name}
-                  </button>
-                ))}
-              </div>
-              <button
-                onClick={() => setShowAddPlaylist(v => !v)}
-                className="h-8 w-8 flex-shrink-0 rounded-sm border border-white/10 text-white/45 hover:text-white flex items-center justify-center"
-                title="New playlist"
-              >
-                <Plus size={14} />
-              </button>
-              <button
-                onClick={() => activePlaylistId && setPendingDelete({ type: 'playlist', playlistId: activePlaylistId, label: activePlaylist?.name || '' })}
-                disabled={!activePlaylistId || playlists.length <= 1}
-                className="h-8 w-8 flex-shrink-0 rounded-sm border border-white/10 text-white/45 hover:text-[#ef4444] disabled:opacity-20 disabled:hover:text-white/45 flex items-center justify-center"
-                title="Delete playlist"
-              >
-                <Trash2 size={14} />
-              </button>
-            </div>
-            {showAddPlaylist && (
-              <div className="flex gap-2 mt-3">
-                <input
-                  value={newPlaylistName}
-                  onChange={(e) => setNewPlaylistName(e.target.value)}
-                  placeholder="New playlist name"
-                  className="min-w-0 flex-1 bg-white/5 border border-white/10 rounded-sm px-3 py-2 text-[12px] text-white outline-none focus:border-white/30"
-                  onKeyDown={(e) => { if (e.key === 'Enter') createPlaylist(); }}
-                />
-                <button
-                  onClick={createPlaylist}
-                  className="px-3 py-2 text-[10px] uppercase tracking-[0.15em] text-black rounded-sm"
-                  style={{ backgroundColor: accentHex }}
-                >
-                  Create
-                </button>
-              </div>
-            )}
+            <button onClick={() => setShowFavoritesPanel(false)} className="text-[10px] uppercase tracking-[0.15em] text-white/40 hover:text-white">Close</button>
           </div>
-          <div className="ui-scroll max-h-[52vh] overflow-y-auto" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.1) transparent' }}>
-            {activePlaylist && activePlaylist.songs.length > 0 ? activePlaylist.songs.map((song) => (
+          <div className="ui-scroll max-h-[65vh] overflow-y-auto" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.1) transparent' }}>
+            {favorites.length > 0 ? favorites.map((song) => (
               <button
                 key={song.id}
-                onClick={() => playSong(song, activePlaylist.songs)}
+                onClick={() => playSong(song, favorites)}
                 className="relative w-full text-left px-5 py-4 pr-16 border-b border-white/5 hover:bg-white/5 transition-colors"
               >
                 <div className="text-[13px] text-white truncate">{song.name}</div>
@@ -499,16 +537,16 @@ export function UI({ theme, onThemeChange }: UIProps) {
                   tabIndex={0}
                   onClick={(e) => {
                     e.stopPropagation();
-                    setPendingDelete({ type: 'song', playlistId: activePlaylist.id, songId: song.id, label: song.name });
+                    removeFavorite(song.id);
                   }}
                   className="absolute right-5 top-1/2 -translate-y-1/2 h-8 w-8 rounded-sm border border-white/10 text-white/45 hover:text-[#ef4444] transition-colors flex items-center justify-center"
-                  title="Remove from playlist"
+                  title="Remove from favorites"
                 >
                   <Trash2 size={14} />
                 </span>
               </button>
             )) : (
-              <div className="px-5 py-8 text-[12px] text-white/40">No songs in this playlist yet</div>
+              <div className="px-5 py-8 text-[12px] text-white/40">No favorites yet. Search and click the heart icon to add songs.</div>
             )}
           </div>
         </div>
@@ -543,22 +581,6 @@ export function UI({ theme, onThemeChange }: UIProps) {
                 </div>
               </button>
             ))}
-          </div>
-        </div>
-      )}
-
-      {/* Confirm Delete Dialog */}
-      {pendingDelete && (
-        <div className="absolute inset-0 z-[120] pointer-events-auto flex items-center justify-center bg-black/40 backdrop-blur-sm">
-          <div className="w-[320px] border border-white/10 rounded-sm p-5" style={{ background: 'rgba(5,10,15,0.96)' }}>
-            <div className="text-[12px] uppercase tracking-[0.2em] text-white/70 mb-3">Confirm Delete</div>
-            <div className="text-[13px] text-white/80 leading-relaxed mb-5">
-              Delete {pendingDelete.type === 'playlist' ? 'playlist' : 'song'} <span className="text-white">{pendingDelete.label}</span>?
-            </div>
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setPendingDelete(null)} className="px-3 py-2 rounded-sm border border-white/10 text-[10px] uppercase tracking-[0.15em] text-white/45 hover:text-white">Cancel</button>
-              <button onClick={confirmPendingDelete} className="px-3 py-2 rounded-sm border border-[#ef4444]/40 text-[10px] uppercase tracking-[0.15em] text-[#ef4444] hover:bg-[#ef4444] hover:text-black">Delete</button>
-            </div>
           </div>
         </div>
       )}
@@ -599,6 +621,8 @@ export function UI({ theme, onThemeChange }: UIProps) {
               max={duration || 100}
               step="0.01"
               value={currentTime}
+              onPointerDown={() => { isSeekingRef.current = true; }}
+              onPointerUp={() => { isSeekingRef.current = false; }}
               onChange={(e) => {
                 if (engine.audioElement) {
                   const newTime = parseFloat(e.target.value);
@@ -667,6 +691,35 @@ export function UI({ theme, onThemeChange }: UIProps) {
       {showFreqPanel && (
         <FreqTriggerPanelWrapper onClose={() => setShowFreqPanel(false)} accentHex={accentHex} />
       )}
+
+      {/* Drag overlay */}
+      {isDragOver && (
+        <div className="absolute inset-0 z-[130] pointer-events-none flex items-center justify-center bg-black/50 backdrop-blur-sm border-2 border-dashed border-white/30">
+          <div className="text-white/60 text-[14px] uppercase tracking-[0.2em]">Drop audio file to play</div>
+        </div>
+      )}
+
+      {/* Confirm file dialog */}
+      {pendingFiles.length > 0 && (
+        <div className="absolute inset-0 z-[120] pointer-events-auto flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="w-[360px] border border-white/10 rounded-sm p-5" style={{ background: 'rgba(5,10,15,0.96)' }}>
+            <div className="text-[12px] uppercase tracking-[0.2em] text-white/70 mb-3">
+              {pendingDropName ? 'Play folder' : 'Play local file'}
+            </div>
+            <div className="text-[13px] text-white/80 leading-relaxed mb-1 truncate" title={pendingDropName || pendingFiles[0].name}>
+              {pendingDropName || pendingFiles[0].name}
+            </div>
+            {pendingFiles.length > 1 && (
+              <div className="text-[11px] text-white/40 mb-4">{pendingFiles.length} audio files</div>
+            )}
+            {pendingFiles.length === 1 && <div className="mb-4" />}
+            <div className="flex justify-end gap-2">
+              <button onClick={() => { setPendingFiles([]); setPendingDropName(null); }} className="px-3 py-2 rounded-sm border border-white/10 text-[10px] uppercase tracking-[0.15em] text-white/45 hover:text-white">Cancel</button>
+              <button onClick={playPendingFiles} className="px-3 py-2 rounded-sm text-[10px] uppercase tracking-[0.15em] text-black" style={{ backgroundColor: accentHex }}>Play</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -704,15 +757,12 @@ function MarqueeText({ text, className }: { text: string; className?: string }) 
   );
 }
 
-function SearchResultItem({ result, isFavorited, accentHex, activePlaylistId, activePlaylistName, onPlay, onFavorite, onAddToPlaylist }: {
+function SearchResultItem({ result, isFavorited, accentHex, onPlay, onFavorite }: {
   result: SearchResult;
   isFavorited: boolean;
   accentHex: string;
-  activePlaylistId: string | null;
-  activePlaylistName?: string;
   onPlay: (result: SearchResult) => void;
   onFavorite: (song: Song) => void;
-  onAddToPlaylist: (song: Song) => void;
 }) {
   const [picUrl, setPicUrl] = useState('');
   const parsed = parseSearchResult(result);
@@ -746,15 +796,6 @@ function SearchResultItem({ result, isFavorited, accentHex, activePlaylistId, ac
         >
           <Heart size={13} fill={isFavorited ? '#ec4899' : 'none'} />
         </button>
-        {activePlaylistId && (
-          <button
-            onClick={() => onAddToPlaylist({ id: parsed.id, name: parsed.name, artist: parsed.artist, album: parsed.album, picId: parsed.picId })}
-            className="p-1.5 text-white/30 hover:text-white transition-colors"
-            title={activePlaylistName ? `Add to ${activePlaylistName}` : 'Add to playlist'}
-          >
-            <ListMusic size={13} />
-          </button>
-        )}
       </div>
     </div>
   );
