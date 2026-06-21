@@ -54,7 +54,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
       });
     }
-    const br = params.get('br') || '320';
+    const br = params.get('br') || '2000';
     const bitrates = [br, '320', '192', '128'];
     const uniqueBr = [...new Set(bitrates)];
 
