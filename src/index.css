@@ -5,3 +5,22 @@
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 }
+
+.ui-scroll::-webkit-scrollbar { width: 4px; }
+.ui-scroll::-webkit-scrollbar-track { background: transparent; }
+.ui-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+.ui-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
+
+@keyframes marquee-loop {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+.marquee-inner {
+  display: inline-flex;
+  white-space: nowrap;
+  animation: marquee-loop var(--marquee-dur, 8s) linear infinite;
+  animation-delay: 1s;
+}
+.marquee-inner:hover {
+  animation-play-state: paused;
+}
